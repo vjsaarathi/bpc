@@ -35,6 +35,10 @@ cargo run
 cargo test
 ```
 
+## Note
+
+Doc comments in this codebase are AI-generated.
+
 ## License
 
 [MIT](LICENSE)

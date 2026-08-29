@@ -2,4 +2,5 @@
 //!
 //! BPC is a tool for analyzing and editing binary protocols.
 
+pub mod bit;
 pub mod tui;
