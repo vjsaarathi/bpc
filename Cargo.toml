@@ -1,0 +1,10 @@
+[package]
+name = "bpc"
+version = "0.0.1"
+edition = "2024"
+description = "A binary protocol workbench"
+license = "MIT"
+
+[dependencies]
+crossterm = "0.29"
+ratatui = "0.30"
