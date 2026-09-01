@@ -1,21 +1,19 @@
 //! TUI rendering for bit layout visualization.
-//!
-//! Provides [`LayoutViewState`] for managing layout view state (selection,
-//! scrolling, and format toggles) and rendering functions for drawing the layout in the terminal.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::bit::BitReader;
 use crate::format::{FormatContext, FormatId, FormatRegistry};
 use crate::layout::{BitLayout, LayoutField};
 use ratatui::{
-    layout::{Alignment, Constraint, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
+    Frame,
 };
 
-/// A flattened node representing a field in the hierarchical layout.
+/// A field projected into the TUI hierarchy.
 #[derive(Debug, Clone)]
 pub struct DisplayNode<'a> {
     pub field: &'a LayoutField,
@@ -24,10 +22,7 @@ pub struct DisplayNode<'a> {
     pub abs_offset: usize,
 }
 
-/// State for the layout view in the TUI.
-///
-/// Tracks the current layout, raw data, cursor position, scroll offset,
-/// format registry, and active formatting options per-field and globally.
+/// State for the binary layout inspector.
 pub struct LayoutViewState {
     layout: BitLayout,
     data: Vec<u8>,
@@ -36,21 +31,24 @@ pub struct LayoutViewState {
     format_registry: FormatRegistry,
     global_format: FormatId,
     field_formats: HashMap<String, FormatId>,
+    expanded: HashSet<String>,
+    bit_mode_hex: bool,
 }
 
 impl LayoutViewState {
-    /// Creates a new layout view with the given layout and data using default formatters.
     pub fn new(layout: BitLayout, data: Vec<u8>) -> Self {
         Self::with_registry(layout, data, FormatRegistry::with_builtins())
     }
 
-    /// Creates a new layout view with a customized format registry.
     pub fn with_registry(layout: BitLayout, data: Vec<u8>, format_registry: FormatRegistry) -> Self {
         let global_format = format_registry
             .formatters()
             .first()
             .map(|f| f.id())
             .unwrap_or_else(|| FormatId::new("hex"));
+
+        let mut expanded = HashSet::new();
+        Self::collect_layout_paths(&layout, "", &mut expanded);
 
         Self {
             layout,
@@ -60,15 +58,34 @@ impl LayoutViewState {
             format_registry,
             global_format,
             field_formats: HashMap::new(),
+            expanded,
+            bit_mode_hex: false,
         }
     }
 
-    /// Returns a reference to the layout.
-    pub fn layout(&self) -> &BitLayout {
-        &self.layout
+    fn collect_layout_paths(layout: &BitLayout, prefix: &str, expanded: &mut HashSet<String>) {
+        for field in layout.fields() {
+            let path = if prefix.is_empty() {
+                field.name().to_string()
+            } else {
+                format!("{}.{}", prefix, field.name())
+            };
+            if matches!(field.field_type(), crate::layout::field::FieldType::Layout(_)) {
+                expanded.insert(path.clone());
+                if let crate::layout::field::FieldType::Layout(nested) = field.field_type() {
+                    Self::collect_layout_paths(nested, &path, expanded);
+                }
+            }
+        }
     }
 
-    /// Recursively flattens the layout into a list of display nodes.
+    pub fn layout(&self) -> &BitLayout { &self.layout }
+    pub fn data(&self) -> &[u8] { &self.data }
+    pub fn cursor_bit(&self) -> usize { self.cursor_bit }
+    pub fn format_registry(&self) -> &FormatRegistry { &self.format_registry }
+    pub fn format_registry_mut(&mut self) -> &mut FormatRegistry { &mut self.format_registry }
+    pub fn global_format(&self) -> &FormatId { &self.global_format }
+
     pub fn flatten_nodes(&self) -> Vec<DisplayNode<'_>> {
         let mut nodes = Vec::new();
         self.flatten_recursive(&self.layout, "", 0, 0, &mut nodes);
@@ -89,166 +106,133 @@ impl LayoutViewState {
             } else {
                 format!("{}.{}", prefix, field.name())
             };
-
             let field_abs_offset = abs_offset + field.offset();
+            nodes.push(DisplayNode { field, path: path.clone(), depth, abs_offset: field_abs_offset });
 
-            nodes.push(DisplayNode {
-                field,
-                path: path.clone(),
-                depth,
-                abs_offset: field_abs_offset,
-            });
+            let is_layout = matches!(field.field_type(), crate::layout::field::FieldType::Layout(_));
+            if is_layout && self.expanded.contains(&path) {
+                if let crate::layout::field::FieldType::Layout(nested) = field.field_type() {
+                    self.flatten_recursive(nested, &path, depth + 1, field_abs_offset, nodes);
+                }
+            }
+        }
+    }
 
+    fn all_nodes(&self) -> Vec<DisplayNode<'_>> {
+        let mut nodes = Vec::new();
+        self.flatten_all_recursive(&self.layout, "", 0, 0, &mut nodes);
+        nodes
+    }
+
+    fn flatten_all_recursive<'a>(
+        &self,
+        layout: &'a BitLayout,
+        prefix: &str,
+        depth: usize,
+        abs_offset: usize,
+        nodes: &mut Vec<DisplayNode<'a>>,
+    ) {
+        for field in layout.fields() {
+            let path = if prefix.is_empty() { field.name().to_string() } else { format!("{}.{}", prefix, field.name()) };
+            let field_abs_offset = abs_offset + field.offset();
+            nodes.push(DisplayNode { field, path: path.clone(), depth, abs_offset: field_abs_offset });
             if let crate::layout::field::FieldType::Layout(nested) = field.field_type() {
-                self.flatten_recursive(nested, &path, depth + 1, field_abs_offset, nodes);
+                self.flatten_all_recursive(nested, &path, depth + 1, field_abs_offset, nodes);
             }
         }
     }
 
-    /// Returns a reference to the raw data.
-    pub fn data(&self) -> &[u8] {
-        &self.data
-    }
-
-    /// Returns the current cursor bit position.
-    pub fn cursor_bit(&self) -> usize {
-        self.cursor_bit
-    }
-
-    /// Returns the format registry.
-    pub fn format_registry(&self) -> &FormatRegistry {
-        &self.format_registry
-    }
-
-    /// Returns a mutable reference to the format registry.
-    pub fn format_registry_mut(&mut self) -> &mut FormatRegistry {
-        &mut self.format_registry
-    }
-
-    /// Returns the global default format ID.
-    pub fn global_format(&self) -> &FormatId {
-        &self.global_format
-    }
-
-    /// Sets the global format ID for all fields.
-    pub fn set_global_format(&mut self, format_id: FormatId) {
-        self.global_format = format_id;
-    }
-
-    /// Returns the active format ID for the given field path.
-    pub fn field_format(&self, path: &str) -> &FormatId {
-        self.field_formats
-            .get(path)
-            .unwrap_or(&self.global_format)
-    }
-
-    /// Sets the format ID for a specific field by path.
-    pub fn set_field_format(&mut self, path: &str, format_id: FormatId) {
-        self.field_formats.insert(path.to_string(), format_id);
-    }
-
-    /// Cycles the active format for the currently selected field.
-    pub fn toggle_selected_field_format(&mut self) {
-        if let Some(path) = self.selected_field_path() {
-            let current = self.field_format(&path).clone();
-            if let Some(next) = self.format_registry.next_format_id(&current) {
-                self.set_field_format(&path, next);
-            }
-        }
-    }
-
-    /// Cycles the active format globally across all fields and resets per-field overrides.
-    pub fn toggle_global_format(&mut self) {
-        let current = self.global_format.clone();
-        if let Some(next) = self.format_registry.next_format_id(&current) {
-            self.global_format = next;
-            // Clear per-field overrides so entire layout syncs to the new global format.
-            self.field_formats.clear();
-        }
-    }
-
-    /// Returns the currently selected node containing the cursor.
     pub fn selected_field_node(&self) -> Option<DisplayNode<'_>> {
-        let nodes = self.flatten_nodes();
-        nodes.into_iter().find(|n| {
-            self.cursor_bit >= n.abs_offset && self.cursor_bit < n.abs_offset + n.field.width()
-        })
+        let nodes = self.all_nodes();
+        nodes.into_iter().find(|n| self.cursor_bit >= n.abs_offset && self.cursor_bit < n.abs_offset + n.field.width())
     }
 
-    /// Returns the path of the currently selected field.
     pub fn selected_field_path(&self) -> Option<String> {
         self.selected_field_node().map(|n| n.path)
     }
 
-    /// Moves the cursor to the start of the next field.
+    pub fn toggle_selected_expansion(&mut self) {
+        if let Some(path) = self.selected_field_path() {
+            if let Some(node) = self.all_nodes().into_iter().find(|n| n.path == path) {
+                if matches!(node.field.field_type(), crate::layout::field::FieldType::Layout(_)) {
+                    if !self.expanded.remove(&path) { self.expanded.insert(path); }
+                }
+            }
+        }
+    }
+
+    pub fn set_global_format(&mut self, format_id: FormatId) { self.global_format = format_id; }
+
+    pub fn field_format(&self, path: &str) -> &FormatId {
+        self.field_formats.get(path).unwrap_or(&self.global_format)
+    }
+
+    pub fn set_field_format(&mut self, path: &str, format_id: FormatId) {
+        self.field_formats.insert(path.to_string(), format_id);
+    }
+
+    pub fn toggle_selected_field_format(&mut self) {
+        if let Some(path) = self.selected_field_path() {
+            let current = self.field_format(&path).clone();
+            if let Some(next) = self.format_registry.next_format_id(&current) { self.set_field_format(&path, next); }
+        }
+    }
+
+    pub fn toggle_global_format(&mut self) {
+        let current = self.global_format.clone();
+        if let Some(next) = self.format_registry.next_format_id(&current) {
+            self.global_format = next;
+            self.field_formats.clear();
+        }
+    }
+
+    pub fn toggle_bit_mode(&mut self) { self.bit_mode_hex = !self.bit_mode_hex; }
+
     pub fn move_next_field(&mut self) {
         let nodes = self.flatten_nodes();
-        if let Some(pos) = nodes.iter().position(|n| n.path == self.selected_field_path().unwrap_or_default()) {
-            if pos + 1 < nodes.len() {
-                self.cursor_bit = nodes[pos + 1].abs_offset;
-            }
-        } else if !nodes.is_empty() {
-            self.cursor_bit = 0;
-        }
+        let current = self.selected_field_path();
+        if let Some(pos) = current.and_then(|p| nodes.iter().position(|n| n.path == p)) {
+            if pos + 1 < nodes.len() { self.cursor_bit = nodes[pos + 1].abs_offset; }
+        } else if let Some(first) = nodes.first() { self.cursor_bit = first.abs_offset; }
     }
 
-    /// Moves the cursor to the start of the previous field.
     pub fn move_prev_field(&mut self) {
         let nodes = self.flatten_nodes();
-        if let Some(pos) = nodes.iter().position(|n| n.path == self.selected_field_path().unwrap_or_default()) {
-            if pos > 0 {
-                self.cursor_bit = nodes[pos - 1].abs_offset;
-            }
-        } else if !nodes.is_empty() {
-            self.cursor_bit = nodes.last().unwrap().abs_offset;
-        }
+        let current = self.selected_field_path();
+        if let Some(pos) = current.and_then(|p| nodes.iter().position(|n| n.path == p)) {
+            if pos > 0 { self.cursor_bit = nodes[pos - 1].abs_offset; }
+        } else if let Some(last) = nodes.last() { self.cursor_bit = last.abs_offset; }
     }
 
-    /// Moves the cursor to the next bit within the current field.
     pub fn move_next_bit(&mut self) {
         if let Some(node) = self.selected_field_node() {
-            if self.cursor_bit + 1 < node.abs_offset + node.field.width() {
-                self.cursor_bit += 1;
-            }
+            if self.cursor_bit + 1 < node.abs_offset + node.field.width() { self.cursor_bit += 1; }
         }
     }
 
-    /// Moves the cursor to the previous bit within the current field.
     pub fn move_prev_bit(&mut self) {
         if let Some(node) = self.selected_field_node() {
-            if self.cursor_bit > node.abs_offset {
-                self.cursor_bit -= 1;
-            }
+            if self.cursor_bit > node.abs_offset { self.cursor_bit -= 1; }
         }
     }
 
-    /// Reads the value of a single bit from the data.
-    ///
-    /// Returns `None` if the bit is outside the available data.
     pub fn read_bit_value(&self, bit_offset: usize) -> Option<bool> {
-        if bit_offset >= self.data.len() * 8 {
-            return None;
-        }
+        if bit_offset >= self.data.len() * 8 { return None; }
         let mut reader = BitReader::from_bytes(&self.data);
         reader.skip(bit_offset).ok()?;
         reader.read_bit().ok()
     }
 
-    /// Returns the formatted value of the field at `path`.
     pub fn format_field_value(&self, path: &str) -> String {
         let (field, abs_offset) = match self.layout.find_by_path(path) {
-            Some(res) => res,
-            None => return "(unknown field)".to_string(),
+            Some(v) => v,
+            None => return "—".into(),
         };
-
-        let format_id = self.field_format(path);
-        let formatter = match self.format_registry.get(format_id) {
-            Some(f) => f,
-            None => return format!("(unknown format {})", format_id.as_str()),
+        let formatter = match self.format_registry.get(self.field_format(path)) {
+            Some(v) => v,
+            None => return "—".into(),
         };
-
         let parsed_value = crate::format::extract_value(field, &self.data);
-
         let ctx = FormatContext {
             data: &self.data,
             offset: abs_offset,
@@ -256,261 +240,147 @@ impl LayoutViewState {
             parsed_value,
             field_type: Some(field.field_type()),
         };
-
         formatter.format(&ctx)
     }
 
-    /// Adjusts scroll to keep the selected field visible.
     pub fn ensure_cursor_visible(&mut self, visible_height: u16) {
         let nodes = self.flatten_nodes();
-        if nodes.is_empty() {
-            self.scroll_x = 0; // Using scroll_x as vertical scroll
-            return;
-        }
+        let Some(path) = self.selected_field_path() else { self.scroll_x = 0; return; };
+        let Some(idx) = nodes.iter().position(|n| n.path == path) else { return; };
+        let height = visible_height.max(1) as usize;
+        let scroll = self.scroll_x as usize;
+        if idx < scroll { self.scroll_x = idx as u16; }
+        else if idx >= scroll + height.saturating_sub(1) { self.scroll_x = idx.saturating_sub(height.saturating_sub(2)) as u16; }
+    }
 
-        let selected_path = self.selected_field_path().unwrap_or_default();
-        let selected_idx = nodes.iter().position(|n| n.path == selected_path).unwrap_or(0);
-
-        let vh = visible_height as usize;
-        let sx = self.scroll_x as usize;
-
-        if selected_idx < sx {
-            self.scroll_x = selected_idx as u16;
-        } else if selected_idx >= sx + vh.saturating_sub(2) {
-            self.scroll_x = (selected_idx + 3).saturating_sub(vh) as u16;
+    fn type_label(field: &LayoutField) -> String {
+        match field.field_type() {
+            crate::layout::field::FieldType::Primitive(_) => format!("bits<{}>", field.width()),
+            crate::layout::field::FieldType::Layout(_) => "layout".into(),
+            crate::layout::field::FieldType::Enum(_) => "enum".into(),
         }
     }
 }
 
-/// Draws the complete layout view into the given area.
-pub fn draw_layout_view(frame: &mut ratatui::Frame, state: &LayoutViewState, area: ratatui::layout::Rect) {
+pub fn draw_layout_view(frame: &mut Frame, state: &LayoutViewState, area: Rect) {
     if state.layout.is_empty() {
-        let p = Paragraph::new("No fields defined.")
-            .block(Block::default().borders(Borders::ALL))
-            .alignment(Alignment::Center);
-        frame.render_widget(p, area);
+        frame.render_widget(
+            Paragraph::new("No fields defined.").block(Block::default().borders(Borders::ALL).title(" Inspector ")),
+            area,
+        );
         return;
     }
 
-    let chunks = Layout::vertical([
-        Constraint::Min(10), // field tree (border + 5 lines + border)
-        Constraint::Length(3), // bit values (border + 1 line + border)
-        Constraint::Min(4),   // details panel
-    ])
-    .split(area);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(8), Constraint::Length(8), Constraint::Length(2)])
+        .split(area);
 
-    draw_tree(frame, state, chunks[0]);
-    draw_bit_values(frame, state, chunks[1]);
-    draw_details(frame, state, chunks[2]);
+    draw_structure_and_fields(frame, state, rows[0]);
+    draw_raw_data(frame, state, rows[1]);
+    draw_context(frame, state, rows[2]);
 }
 
-/// Draws the hierarchical field tree.
-fn draw_tree(frame: &mut ratatui::Frame, state: &LayoutViewState, area: ratatui::layout::Rect) {
-    let nodes = state.flatten_nodes();
-    let selected_path = state.selected_field_path();
+fn draw_structure_and_fields(frame: &mut Frame, state: &LayoutViewState, area: Rect) {
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(28), Constraint::Percentage(72)])
+        .split(area);
 
+    draw_tree(frame, state, cols[0]);
+    draw_field_table(frame, state, cols[1]);
+}
+
+fn draw_tree(frame: &mut Frame, state: &LayoutViewState, area: Rect) {
+    let selected = state.selected_field_path();
     let mut lines = Vec::new();
-
-    if nodes.is_empty() {
-        lines.push(Line::from(Span::styled("(no fields)", Style::default().fg(Color::DarkGray))));
-    }
+    let nodes = state.flatten_nodes();
 
     for node in nodes {
-        let is_selected = Some(&node.path) == selected_path.as_ref();
-        
-        // Depth indentation
-        let indent = "  ".repeat(node.depth);
-        let prefix = if node.field.is_variable() { "~" } else { "-" };
-        
-        let type_marker = match node.field.field_type() {
-            crate::layout::field::FieldType::Layout(_) => "[Layout]",
-            crate::layout::field::FieldType::Enum(_) => "[Enum]",
-            crate::layout::field::FieldType::Primitive(_) => "",
-        };
-
-        let val_str = state.format_field_value(&node.path);
-        let fmt_id = state.field_format(&node.path).as_str();
-
-        let label = format!("{indent}{prefix} {} {} ({} bits) = {} [{}]", node.field.name(), type_marker, node.field.width(), val_str, fmt_id);
-        
+        let is_selected = selected.as_deref() == Some(node.path.as_str());
+        let is_layout = matches!(node.field.field_type(), crate::layout::field::FieldType::Layout(_));
+        let marker = if is_layout { if state.expanded.contains(&node.path) { "▾" } else { "▸" } } else { "·" };
+        let label = format!("{}{} {}", "  ".repeat(node.depth), marker, node.field.name());
         let style = if is_selected {
-            Style::default()
-                .bg(Color::Yellow)
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else if is_layout {
+            Style::default().add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
-
         lines.push(Line::from(Span::styled(label, style)));
     }
 
-    let block = Block::default().title(" Layout Tree ").borders(Borders::ALL);
-    // Since it's a vertical list, we might want to slice `lines` by scroll, but Paragraph handles some of this.
-    // Actually scroll_x might need to be scroll_y for vertical scrolling.
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .scroll((0, state.scroll_x)); // scroll_x is a bit badly named now, but we'll use it as scroll_y.
-
-    frame.render_widget(paragraph, area);
+    let block = Block::default().title(" Structure ").borders(Borders::ALL);
+    frame.render_widget(Paragraph::new(lines).block(block).scroll((0, state.scroll_x)), area);
 }
 
-/// Draws the bit values
-fn draw_bit_values(frame: &mut ratatui::Frame, state: &LayoutViewState, area: ratatui::layout::Rect) {
-    let layout = &state.layout;
-    let layout_bits = layout.bit_len();
-    let data_bits = state.data.len() * 8;
-    let readable = layout_bits.min(data_bits);
+fn draw_field_table(frame: &mut Frame, state: &LayoutViewState, area: Rect) {
+    let selected = state.selected_field_path();
+    let nodes = state.flatten_nodes();
+    let header = Line::from(vec![
+        Span::styled(format!("{:<24}", "NAME"), Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<14}", "TYPE"), Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:<14}", "RANGE"), Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("VALUE", Style::default().add_modifier(Modifier::BOLD)),
+    ]);
+    let mut lines = vec![header, Line::from("────────────────────────────────────────────────────────────────────────")];
 
-    let mut spans: Vec<Span> = vec![Span::raw("  ")];
+    for node in nodes {
+        let selected_row = selected.as_deref() == Some(node.path.as_str());
+        let name_width = 24usize.saturating_sub(node.depth * 2).max(8);
+        let name = format!("{}{}", "  ".repeat(node.depth), node.field.name());
+        let value = if matches!(node.field.field_type(), crate::layout::field::FieldType::Layout(_)) { "—".into() } else { state.format_field_value(&node.path) };
+        let row = format!("{:<width$} {:<14} {:<14} {}", name, Self::type_label(node.field), format!("{}..{}", node.abs_offset, node.abs_offset + node.field.width().saturating_sub(1)), value, width = name_width);
+        let style = if selected_row { Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default() };
+        lines.push(Line::from(Span::styled(row, style)));
+    }
 
-    if layout_bits == 0 {
-        spans.push(Span::styled("(no data)", Style::default().fg(Color::DarkGray)));
-    } else {
+    frame.render_widget(Paragraph::new(lines).block(Block::default().title(" Fields ").borders(Borders::ALL)).scroll((0, state.scroll_x)), area);
+}
+
+fn draw_raw_data(frame: &mut Frame, state: &LayoutViewState, area: Rect) {
+    let layout_bits = state.layout.bit_len();
+    let readable = layout_bits.min(state.data.len() * 8);
+    let selected = state.selected_field_node();
+    let mut spans = Vec::new();
+
+    if state.bit_mode_hex {
+        for (i, byte) in state.data.iter().enumerate() {
+            if i * 8 >= layout_bits { break; }
+            let start = i * 8;
+            let end = (start + 8).min(layout_bits);
+            let highlighted = selected.as_ref().is_some_and(|n| start < n.abs_offset + n.field.width() && end > n.abs_offset);
+            if i > 0 { spans.push(Span::raw(" ")); }
+            spans.push(Span::styled(format!("{:02X}", byte), if highlighted { Style::default().bg(Color::Yellow).fg(Color::Black).add_modifier(Modifier::BOLD) } else { Style::default() }));
+        }
+    } else if readable > 0 {
         let mut reader = BitReader::new(&state.data, readable);
-        let selected_node = state.selected_field_node();
-
-        let nodes = state.flatten_nodes();
-
-        for bit_idx in 0..layout_bits {
-            // Separator before this bit.
-            if bit_idx > 0 {
-                let is_field_boundary = nodes.iter().any(|n| n.abs_offset == bit_idx);
-                let is_byte_boundary = bit_idx % 8 == 0;
-
-                if is_field_boundary {
-                    spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
-                } else if is_byte_boundary {
-                    spans.push(Span::raw(" "));
-                }
-            }
-
-            // Read the bit value.
-            let (ch, available) = if bit_idx < readable {
-                let bit = reader.read_bit().unwrap_or(false);
-                (if bit { '1' } else { '0' }, true)
-            } else {
-                ('·', false)
-            };
-
-            let is_in_selected = selected_node.as_ref().is_some_and(|n| {
-                bit_idx >= n.abs_offset && bit_idx < n.abs_offset + n.field.width()
-            });
-
-            let style = if bit_idx == state.cursor_bit {
-                Style::default()
-                    .bg(Color::Cyan)
-                    .fg(Color::Black)
-                    .add_modifier(Modifier::BOLD)
-            } else if !available {
-                Style::default().fg(Color::DarkGray)
-            } else if is_in_selected {
-                Style::default().fg(Color::Yellow)
-            } else {
-                Style::default()
-            };
-
-            spans.push(Span::styled(ch.to_string(), style));
+        for bit in 0..readable {
+            if bit > 0 && bit % 8 == 0 { spans.push(Span::raw(" ")); }
+            let value = reader.read_bit().unwrap_or(false);
+            let highlighted = selected.as_ref().is_some_and(|n| bit >= n.abs_offset && bit < n.abs_offset + n.field.width());
+            let style = if bit == state.cursor_bit { Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD) } else if highlighted { Style::default().bg(Color::Yellow).fg(Color::Black) } else { Style::default() };
+            spans.push(Span::styled(if value { "1" } else { "0" }, style));
         }
-
-        // Padding past layout end to complete the byte.
-        let padded = (layout_bits + 7) / 8 * 8;
-        for bit_idx in layout_bits..padded {
-            if bit_idx > 0 && bit_idx % 8 == 0 {
-                spans.push(Span::raw(" "));
-            }
-            spans.push(Span::styled("·", Style::default().fg(Color::DarkGray)));
-        }
+    } else {
+        spans.push(Span::styled("No data", Style::default().add_modifier(Modifier::DIM)));
     }
 
-    let text = vec![Line::from(spans)];
-    let p = Paragraph::new(text)
-        .block(Block::default().borders(Borders::ALL).title(" Bits "))
-        .scroll((0, state.scroll_x));
-    frame.render_widget(p, area);
+    let mode = if state.bit_mode_hex { "HEX" } else { "BITS" };
+    frame.render_widget(Paragraph::new(Line::from(spans)).block(Block::default().title(format!(" Wire · {} ", mode)).borders(Borders::ALL)), area);
 }
 
-/// Draws the details panel showing info about the selected field and bit across all registered formats.
-fn draw_details(frame: &mut ratatui::Frame, state: &LayoutViewState, area: ratatui::layout::Rect) {
-    let mut lines = Vec::new();
-
-    if let Some(node) = state.selected_field_node() {
-        let field = node.field;
-        let current_fmt_id = state.field_format(&node.path);
-
-        lines.push(Line::from(vec![
-            Span::styled("  Field: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(field.name()),
-            Span::raw(format!(
-                " (Path: {}, Abs Offset: {}, Width: {}b, Range: [{}, {}))",
-                node.path,
-                node.abs_offset,
-                field.width(),
-                node.abs_offset,
-                node.abs_offset + field.width()
-            )),
-        ]));
-
-        // Bit details.
-        let cursor = state.cursor_bit;
-        let relative = cursor - node.abs_offset;
-        let value = state.read_bit_value(cursor);
-        let value_str = match value {
-            Some(true) => "1",
-            Some(false) => "0",
-            None => "?",
-        };
-        lines.push(Line::from(vec![
-            Span::styled("  Bit: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(format!(
-                "absolute={cursor}  relative={relative}  value={value_str}"
-            )),
-        ]));
-
-        lines.push(Line::from(""));
-
-        // Representations in all registered formats:
-        let parsed_value = crate::format::extract_value(field, &state.data);
-
-        let ctx = FormatContext {
-            data: &state.data,
-            offset: node.abs_offset,
-            width: field.width(),
-            parsed_value,
-            field_type: Some(field.field_type()),
-        };
-
-        let mut format_spans = vec![Span::styled(
-            "  Formats: ",
-            Style::default().add_modifier(Modifier::BOLD),
-        )];
-
-        for (f_idx, formatter) in state.format_registry.formatters().iter().enumerate() {
-            let is_active = formatter.id() == *current_fmt_id;
-            let val_str = formatter.format(&ctx);
-            let label = format!("{}: {}", formatter.name(), val_str);
-
-            if f_idx > 0 {
-                format_spans.push(Span::raw(" | "));
-            }
-
-            if is_active {
-                format_spans.push(Span::styled(
-                    label,
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ));
-            } else {
-                format_spans.push(Span::raw(label));
-            }
-        }
-        lines.push(Line::from(format_spans));
+fn draw_context(frame: &mut Frame, state: &LayoutViewState, area: Rect) {
+    let text = if let Some(node) = state.selected_field_node() {
+        let rendered = if matches!(node.field.field_type(), crate::layout::field::FieldType::Layout(_)) { "—".into() } else { state.format_field_value(&node.path) };
+        format!("● {}  ·  {}  ·  bits {}..{}  ·  {}", node.path, Self::type_label(node.field), node.abs_offset, node.abs_offset + node.field.width().saturating_sub(1), rendered)
     } else {
-        lines.push(Line::from("  No field selected."));
-    }
+        "● No field selected".into()
+    };
+    frame.render_widget(Paragraph::new(text).block(Block::default().borders(Borders::ALL)), area);
+}
 
-    let p = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(" Details "));
-    frame.render_widget(p, area);
+fn Self::type_label(field: &LayoutField) -> String {
+    LayoutViewState::type_label(field)
 }
