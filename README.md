@@ -11,12 +11,12 @@ The goal is to provide a bit-level engine combined with a scriptable environment
 ## Roadmap
 
 - [x] **Phase 0** — Foundation & TUI skeleton
-- [ ] **Phase 1** — Bit reader / writer engine
-- [ ] **Phase 2** — Bit layout & field definitions
-- [ ] **Phase 3** — Typed values & conversions
-- [ ] **Phase 4** — Protocol schema & message specs
-- [ ] **Phase 5** — Lua scripting integration
-- [ ] **Phase 6** — Interactive TUI workbench
+- [x] **Phase 1** — Bit reader / writer engine
+- [x] **Phase 2** — Bit layout & field definitions
+- [x] **Phase 3** — Typed values & conversions
+- [x] **Phase 4** — Protocol schema & message specs
+- [x] **Phase 5** — Lua scripting integration
+- [x] **Phase 6** — Interactive TUI workbench
 - [ ] **Phase 7** — Transport drivers (TCP/UDP/Serial)
 - [ ] **Phase 8** — Protocol testing & fuzzing framework
 
@@ -28,11 +28,28 @@ Requires Rust (2024 edition).
 # Build binary & library
 cargo build
 
-# Run the TUI
+# Run the TUI (defaults to a built-in demo)
 cargo run
 
 # Run test suite
 cargo test
+```
+
+## Examples
+
+BPC supports loading protocol layouts via Lua scripts and rendering them against binary data files. We have included several real-world binary protocol examples in the `examples/` directory.
+
+You can try them out by running:
+
+```bash
+# HTTP/2 Frame (demonstrates dynamic payload parsing)
+cargo run -- examples/http2_frame.lua examples/http2_frame.bin
+
+# IPv6 Packet Header (demonstrates 128-bit fields and dynamic payloads)
+cargo run -- examples/ipv6_packet.lua examples/ipv6_packet.bin
+
+# TCP Header (demonstrates dense bit-packing and boolean flags)
+cargo run -- examples/tcp_header.lua examples/tcp_header.bin
 ```
 
 ## Note
