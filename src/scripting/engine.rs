@@ -337,6 +337,28 @@ impl ScriptEngine {
         let val = self.lua.globals().get::<T>(name)?;
         Ok(val)
     }
+
+    /// Retrieves a globally defined layout from the Lua environment.
+    ///
+    /// Expects a global variable with the given name to be a fully built `LuaLayout`.
+    pub fn get_global_layout(&self, name: &str) -> Result<BitLayout, ScriptError> {
+        let val: mlua::Value = self.lua.globals().get(name)?;
+        match val {
+            mlua::Value::UserData(ud) => {
+                if let Ok(lua_layout) = ud.borrow::<LuaLayout>() {
+                    Ok(lua_layout.layout.clone())
+                } else if ud.borrow::<LuaLayoutBuilder>().is_ok() || ud.borrow::<LuaLayoutBuilderRef>().is_ok() {
+                    Err(ScriptError::Message(format!(
+                        "Global '{}' is a layout builder; did you forget to call `:build()`?",
+                        name
+                    )))
+                } else {
+                    Err(ScriptError::Message(format!("Global '{}' is not a valid layout", name)))
+                }
+            }
+            _ => Err(ScriptError::Message(format!("Global '{}' is not a layout", name))),
+        }
+    }
 }
 
 /// Registers the `bpc` module into the Lua `package.loaded` table.
