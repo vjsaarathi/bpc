@@ -1,6 +1,6 @@
 local bpc = require("bpc")
 
-layout = bpc.layout("network_packet")
+return bpc.layout("network_packet")
     :field("version", 4)
     :field("flags", 4)
     :field("length", 8)

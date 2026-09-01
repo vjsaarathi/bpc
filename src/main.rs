@@ -15,16 +15,11 @@ fn main() -> io::Result<()> {
         // 1. Read the binary data file
         let data = fs::read(data_path)?;
 
-        // 2. Initialize the script engine and execute the Lua file
+        // 2. Initialize the script engine and directly extract the returned layout
         let engine = ScriptEngine::new().expect("Failed to initialize script engine");
-        engine
-            .exec_file(std::path::Path::new(script_path))
-            .unwrap_or_else(|e| panic!("Failed to execute script '{}': {}", script_path, e));
-
-        // 3. Extract the layout from a global variable named `layout`
         let raw_layout = engine
-            .get_global_layout("layout")
-            .expect("Script must define a global variable named `layout` (don't forget to call :build())");
+            .eval_file_as_layout(std::path::Path::new(script_path))
+            .unwrap_or_else(|e| panic!("{}", e));
 
         // 4. Resolve the layout against the data if there are variable-width fields
         let resolved_layout = if raw_layout.has_variable_fields() {

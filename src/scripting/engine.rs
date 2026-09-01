@@ -339,24 +339,42 @@ impl ScriptEngine {
     }
 
     /// Retrieves a globally defined layout from the Lua environment.
-    ///
-    /// Expects a global variable with the given name to be a fully built `LuaLayout`.
     pub fn get_global_layout(&self, name: &str) -> Result<BitLayout, ScriptError> {
         let val: mlua::Value = self.lua.globals().get(name)?;
+        self.extract_layout(val).map_err(|e| ScriptError::Message(format!("Global '{}': {}", name, e)))
+    }
+
+    /// Evaluates Lua code and extracts the returned layout.
+    pub fn eval_as_layout(&self, code: &str) -> Result<BitLayout, ScriptError> {
+        let val: mlua::Value = self.lua.load(code).eval()?;
+        self.extract_layout(val)
+    }
+
+    /// Executes a Lua script file and extracts the returned layout.
+    pub fn eval_file_as_layout(&self, path: &std::path::Path) -> Result<BitLayout, ScriptError> {
+        let code = std::fs::read_to_string(path)
+            .map_err(|e| ScriptError::Message(format!("cannot read {}: {e}", path.display())))?;
+        let val: mlua::Value = self.lua
+            .load(&code)
+            .set_name(path.to_string_lossy())
+            .eval()?;
+        self.extract_layout(val).map_err(|e| ScriptError::Message(format!("Script '{}': {}", path.display(), e)))
+    }
+
+    fn extract_layout(&self, val: mlua::Value) -> Result<BitLayout, ScriptError> {
         match val {
             mlua::Value::UserData(ud) => {
                 if let Ok(lua_layout) = ud.borrow::<LuaLayout>() {
                     Ok(lua_layout.layout.clone())
                 } else if ud.borrow::<LuaLayoutBuilder>().is_ok() || ud.borrow::<LuaLayoutBuilderRef>().is_ok() {
-                    Err(ScriptError::Message(format!(
-                        "Global '{}' is a layout builder; did you forget to call `:build()`?",
-                        name
-                    )))
+                    Err(ScriptError::Message(
+                        "returned a layout builder; did you forget to call `:build()`?".into()
+                    ))
                 } else {
-                    Err(ScriptError::Message(format!("Global '{}' is not a valid layout", name)))
+                    Err(ScriptError::Message("returned an invalid layout UserData".into()))
                 }
             }
-            _ => Err(ScriptError::Message(format!("Global '{}' is not a layout", name))),
+            _ => Err(ScriptError::Message("did not return a layout".into())),
         }
     }
 }
