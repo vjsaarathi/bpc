@@ -147,56 +147,81 @@ impl FieldWidth {
     }
 }
 
+/// The type of a field in a layout.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FieldType {
+    /// A primitive bit field, with either a fixed or variable width.
+    Primitive(FieldWidth),
+    /// A nested layout. The width is intrinsically the layout's total bit length.
+    Layout(std::sync::Arc<crate::layout::BitLayout>),
+    /// An enumeration mapping encoded values to variants.
+    Enum {
+        width: FieldWidth,
+        // Scaffolded for now.
+        // mapping: Arc<HashMap<u64, String>>
+    },
+}
+
+impl FieldType {
+    /// Returns `true` if this field type has a fixed width.
+    pub fn is_fixed(&self) -> bool {
+        match self {
+            FieldType::Primitive(w) | FieldType::Enum { width: w, .. } => w.is_fixed(),
+            FieldType::Layout(_) => true, // Layouts are currently fixed-width aggregations
+        }
+    }
+
+    /// Returns the fixed width value, or `None` if derived.
+    pub fn fixed_width(&self) -> Option<usize> {
+        match self {
+            FieldType::Primitive(w) | FieldType::Enum { width: w, .. } => w.fixed_width(),
+            FieldType::Layout(l) => Some(l.bit_len()),
+        }
+    }
+}
+
 /// A named region in a bit stream.
 ///
 /// Identifies a field by name and bit range. Does not carry protocol-specific
 /// semantics — it simply marks a named region.
-///
-/// # Examples
-///
-/// ```
-/// use bpc::layout::{BitRange, LayoutField};
-///
-/// let field = LayoutField::new("version", BitRange::new(0, 3));
-/// assert_eq!(field.name(), "version");
-/// assert_eq!(field.offset(), 0);
-/// assert_eq!(field.width(), 3);
-/// assert_eq!(field.end(), 3);
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LayoutField {
     name: String,
-    range: BitRange,
-    width_spec: FieldWidth,
+    offset: usize,
+    field_type: FieldType,
 }
 
 impl LayoutField {
-    /// Creates a new layout field with the given name and bit range.
+    /// Creates a new primitive layout field with the given name and bit range.
     ///
     /// The field is assumed to have a fixed width matching the range.
     pub fn new(name: impl Into<String>, range: BitRange) -> Self {
-        let width = range.width();
         Self {
             name: name.into(),
-            range,
-            width_spec: FieldWidth::Fixed(width),
+            offset: range.offset(),
+            field_type: FieldType::Primitive(FieldWidth::Fixed(range.width())),
         }
     }
 
-    /// Creates a new layout field with a variable width specification.
-    ///
-    /// The `range` holds the placeholder position (offset may be known, width
-    /// is a placeholder until resolved against data). The `width_spec` describes
-    /// how the real width is determined at resolve time.
+    /// Creates a new primitive layout field with a variable width specification.
     pub fn new_variable(
         name: impl Into<String>,
-        range: BitRange,
+        offset: usize,
         width_spec: FieldWidth,
     ) -> Self {
         Self {
             name: name.into(),
-            range,
-            width_spec,
+            offset,
+            field_type: FieldType::Primitive(width_spec),
+        }
+    }
+
+    /// Creates a field representing a nested layout.
+    pub fn new_layout(name: impl Into<String>, offset: usize, layout: std::sync::Arc<crate::layout::BitLayout>) -> Self {
+        Self {
+            name: name.into(),
+            offset,
+            field_type: FieldType::Layout(layout),
         }
     }
 
@@ -205,39 +230,39 @@ impl LayoutField {
         &self.name
     }
 
-    /// The field's bit range.
-    pub fn range(&self) -> &BitRange {
-        &self.range
-    }
-
-    /// The field's width specification.
-    pub fn width_spec(&self) -> &FieldWidth {
-        &self.width_spec
+    /// The field's type.
+    pub fn field_type(&self) -> &FieldType {
+        &self.field_type
     }
 
     /// Returns `true` if this field has a variable (data-dependent) width.
     pub fn is_variable(&self) -> bool {
-        !self.width_spec.is_fixed()
+        !self.field_type.is_fixed()
     }
 
     /// Starting bit offset.
     pub fn offset(&self) -> usize {
-        self.range.offset()
+        self.offset
     }
 
-    /// Width in bits.
+    /// Width in bits. If variable and unresolved, returns 0.
     pub fn width(&self) -> usize {
-        self.range.width()
+        self.field_type.fixed_width().unwrap_or(0)
+    }
+
+    /// The field's bit range (computed on the fly).
+    pub fn range(&self) -> BitRange {
+        BitRange::new(self.offset(), self.width())
     }
 
     /// Exclusive end position.
     pub fn end(&self) -> usize {
-        self.range.end()
+        self.offset() + self.width()
     }
 
     /// Returns `true` if this field contains the given bit offset.
     pub fn contains(&self, bit: usize) -> bool {
-        self.range.contains(bit)
+        self.range().contains(bit)
     }
 }
 
@@ -323,6 +348,6 @@ mod tests {
     fn layout_field_range_accessor() {
         let range = BitRange::new(10, 20);
         let field = LayoutField::new("data", range);
-        assert_eq!(*field.range(), range);
+        assert_eq!(field.range(), range);
     }
 }
