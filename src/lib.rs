@@ -5,4 +5,5 @@
 pub mod bit;
 pub mod format;
 pub mod layout;
+pub mod scripting;
 pub mod tui;
