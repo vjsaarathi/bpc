@@ -91,9 +91,48 @@ impl BitLayout {
         self.fields.iter().position(|f| f.contains(offset))
     }
 
+    /// Returns the field at the given hierarchical path, along with its absolute bit offset.
+    ///
+    /// Paths are dot-separated (e.g., `header.flags`).
+    pub fn find_by_path<'a>(&'a self, path: &str) -> Option<(&'a LayoutField, usize)> {
+        let parts: Vec<&str> = path.split('.').collect();
+        self.find_by_path_parts(&parts, 0)
+    }
+
+    fn find_by_path_parts<'a>(&'a self, parts: &[&str], abs_offset: usize) -> Option<(&'a LayoutField, usize)> {
+        if parts.is_empty() {
+            return None;
+        }
+        let head = parts[0];
+        let field = self.field_by_name(head)?;
+
+        let current_abs = abs_offset + field.offset();
+
+        if parts.len() == 1 {
+            return Some((field, current_abs));
+        }
+
+        match field.field_type() {
+            crate::layout::field::FieldType::Layout(nested) => {
+                nested.find_by_path_parts(&parts[1..], current_abs)
+            }
+            _ => None, // Path continues but field is not a nested layout
+        }
+    }
+
     /// Returns `true` if any field has a variable (data-dependent) width.
     pub fn has_variable_fields(&self) -> bool {
-        self.fields.iter().any(|f| f.is_variable())
+        self.fields.iter().any(|f| {
+            if f.is_variable() {
+                return true;
+            }
+            if let crate::layout::field::FieldType::Layout(nested) = f.field_type() {
+                if nested.has_variable_fields() {
+                    return true;
+                }
+            }
+            false
+        })
     }
 
     /// Resolves variable-width fields against the given data, producing a
@@ -136,6 +175,12 @@ impl BitLayout {
     /// assert!(!resolved.has_variable_fields());
     /// ```
     pub fn resolve(&self, data: &[u8]) -> LayoutResult<BitLayout> {
+        self.resolve_at(data, 0)
+    }
+
+    /// Resolves variable-width fields and nested layouts against the given data,
+    /// starting at `abs_offset` within the data for source field evaluation.
+    pub fn resolve_at(&self, data: &[u8], abs_offset: usize) -> LayoutResult<BitLayout> {
         if !self.has_variable_fields() {
             return Ok(self.clone());
         }
@@ -173,7 +218,7 @@ impl BitLayout {
                     // Read the source field's value.
                     let mut reader = BitReader::from_bytes(data);
                     reader
-                        .skip(src.offset())
+                        .skip(abs_offset + src.offset())
                         .map_err(|_| LayoutError::InsufficientData {
                             field: field.name().to_string(),
                             needed_bits: src.end(),
@@ -199,17 +244,59 @@ impl BitLayout {
                     next_offset = next_offset.saturating_add(width_bits);
                 }
                 crate::layout::field::FieldType::Layout(nested) => {
-                    // Temporarily just copy layout fields, later it should recursively resolve
-                    let w = nested.bit_len();
-                    resolved_fields.push(LayoutField::new_layout(field.name(), next_offset, nested.clone()));
+                    let resolved_nested = nested.resolve_at(data, abs_offset + next_offset)?;
+                    let w = resolved_nested.bit_len();
+                    resolved_fields.push(LayoutField::new_layout(field.name(), next_offset, std::sync::Arc::new(resolved_nested)));
                     next_offset = next_offset.saturating_add(w);
                 }
-                crate::layout::field::FieldType::Enum { width, .. } => {
-                    if let FieldWidth::Fixed(w) = width {
-                        let range = BitRange::new(next_offset, *w);
-                        resolved_fields.push(LayoutField::new(field.name(), range)); // wait, enum data is lost!
-                        // Actually, I shouldn't throw away enum formatting, but let's just make it compile for now.
+                crate::layout::field::FieldType::Enum(enum_def) => {
+                    if let FieldWidth::Fixed(w) = enum_def.width() {
+                        resolved_fields.push(LayoutField::new_enum(field.name(), next_offset, enum_def.clone()));
                         next_offset = next_offset.saturating_add(*w);
+                    } else if let FieldWidth::DerivedFrom { source_field, unit } = enum_def.width() {
+                        let src = resolved_fields
+                            .iter()
+                            .find(|f| f.name() == source_field)
+                            .ok_or_else(|| LayoutError::UnknownSourceField {
+                                field: field.name().to_string(),
+                                source: source_field.clone(),
+                            })?;
+
+                        let src_end = src.end();
+                        if src_end > data_bits {
+                            return Err(LayoutError::InsufficientData {
+                                field: field.name().to_string(),
+                                needed_bits: src_end,
+                                available_bits: data_bits,
+                            });
+                        }
+
+                        let mut reader = BitReader::from_bytes(data);
+                        reader
+                            .skip(abs_offset + src.offset())
+                            .map_err(|_| LayoutError::InsufficientData {
+                                field: field.name().to_string(),
+                                needed_bits: src.end(),
+                                available_bits: data_bits,
+                            })?;
+                        let raw_value = reader
+                            .read_bits(src.width() as u32)
+                            .map_err(|_| LayoutError::InsufficientData {
+                                field: field.name().to_string(),
+                                needed_bits: src.end(),
+                                available_bits: data_bits,
+                            })?;
+
+                        let width_bits = unit.to_bits(raw_value) as usize;
+                        if width_bits == 0 {
+                            return Err(LayoutError::ResolvedZeroWidth {
+                                field: field.name().to_string(),
+                            });
+                        }
+
+                        let resolved_enum = enum_def.with_width(FieldWidth::Fixed(width_bits));
+                        resolved_fields.push(LayoutField::new_enum(field.name(), next_offset, std::sync::Arc::new(resolved_enum)));
+                        next_offset = next_offset.saturating_add(width_bits);
                     }
                 }
             }
@@ -336,6 +423,20 @@ impl BitLayoutBuilder {
         self
     }
 
+    /// Adds a field backed by an enum definition.
+    pub fn field_enum(mut self, name: &str, enum_def: std::sync::Arc<crate::layout::enum_def::EnumDef>) -> Self {
+        let is_var = !enum_def.width().is_fixed();
+        self.fields.push(LayoutField::new_enum(
+            name,
+            self.next_offset,
+            enum_def.clone(),
+        ));
+        if !is_var {
+            self.next_offset = self.next_offset.saturating_add(enum_def.width().fixed_width().unwrap());
+        }
+        self
+    }
+
     /// Validates and builds the layout.
     ///
     /// # Errors
@@ -355,6 +456,11 @@ impl BitLayoutBuilder {
         for field in &self.fields {
             if field.name().is_empty() {
                 return Err(LayoutError::EmptyFieldName);
+            }
+            if field.name().contains('.') {
+                return Err(LayoutError::InvalidFieldName {
+                    name: field.name().to_string(),
+                });
             }
             // Only check zero width for fixed-width fields.
             if let Some(w) = field.field_type().fixed_width() {

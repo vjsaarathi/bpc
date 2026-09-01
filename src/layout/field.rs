@@ -155,18 +155,15 @@ pub enum FieldType {
     /// A nested layout. The width is intrinsically the layout's total bit length.
     Layout(std::sync::Arc<crate::layout::BitLayout>),
     /// An enumeration mapping encoded values to variants.
-    Enum {
-        width: FieldWidth,
-        // Scaffolded for now.
-        // mapping: Arc<HashMap<u64, String>>
-    },
+    Enum(std::sync::Arc<crate::layout::enum_def::EnumDef>),
 }
 
 impl FieldType {
     /// Returns `true` if this field type has a fixed width.
     pub fn is_fixed(&self) -> bool {
         match self {
-            FieldType::Primitive(w) | FieldType::Enum { width: w, .. } => w.is_fixed(),
+            FieldType::Primitive(w) => w.is_fixed(),
+            FieldType::Enum(e) => e.width().is_fixed(),
             FieldType::Layout(_) => true, // Layouts are currently fixed-width aggregations
         }
     }
@@ -174,7 +171,8 @@ impl FieldType {
     /// Returns the fixed width value, or `None` if derived.
     pub fn fixed_width(&self) -> Option<usize> {
         match self {
-            FieldType::Primitive(w) | FieldType::Enum { width: w, .. } => w.fixed_width(),
+            FieldType::Primitive(w) => w.fixed_width(),
+            FieldType::Enum(e) => e.width().fixed_width(),
             FieldType::Layout(l) => Some(l.bit_len()),
         }
     }
@@ -222,6 +220,15 @@ impl LayoutField {
             name: name.into(),
             offset,
             field_type: FieldType::Layout(layout),
+        }
+    }
+
+    /// Creates a field representing an enum.
+    pub fn new_enum(name: impl Into<String>, offset: usize, enum_def: std::sync::Arc<crate::layout::enum_def::EnumDef>) -> Self {
+        Self {
+            name: name.into(),
+            offset,
+            field_type: FieldType::Enum(enum_def),
         }
     }
 

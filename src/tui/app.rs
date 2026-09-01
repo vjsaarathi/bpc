@@ -103,7 +103,7 @@ impl App {
             // Pre-compute scroll based on terminal size.
             let size = terminal.size()?;
             if let Some(ref mut view) = self.layout_view {
-                view.ensure_cursor_visible(size.width.saturating_sub(4));
+                view.ensure_cursor_visible(size.height.saturating_sub(4));
             }
 
             terminal.draw(|frame| super::ui::draw(frame, self))?;
@@ -179,10 +179,10 @@ mod tests {
         let mut app = App::new();
         let layout = BitLayout::builder().field("x", 8).build().unwrap();
         app.set_layout_view(LayoutViewState::new(layout, vec![0xFF]));
-        assert_eq!(app.layout_view().unwrap().field_format(0).as_str(), "hex");
+        assert_eq!(app.layout_view().unwrap().field_format("x").as_str(), "hex");
 
         app.handle_key_event(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::empty()));
-        assert_eq!(app.layout_view().unwrap().field_format(0).as_str(), "dec");
+        assert_eq!(app.layout_view().unwrap().field_format("x").as_str(), "dec");
     }
 
     #[test]
@@ -196,7 +196,7 @@ mod tests {
 
         app.handle_key_event(KeyEvent::new(KeyCode::Char('F'), KeyModifiers::empty()));
         assert_eq!(app.layout_view().unwrap().global_format().as_str(), "dec");
-        assert_eq!(app.layout_view().unwrap().field_format(0).as_str(), "dec");
-        assert_eq!(app.layout_view().unwrap().field_format(1).as_str(), "dec");
+        assert_eq!(app.layout_view().unwrap().field_format("x").as_str(), "dec");
+        assert_eq!(app.layout_view().unwrap().field_format("y").as_str(), "dec");
     }
 }

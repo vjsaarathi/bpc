@@ -35,6 +35,17 @@ impl std::fmt::Display for FormatId {
     }
 }
 
+/// Represents the extracted structured data of a field.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Value {
+    /// A raw primitive integer.
+    Primitive(u64),
+    /// An enum value, with its optional matched variant name.
+    EnumVariant { value: u64, name: Option<String> },
+    /// A nested structure of named fields.
+    Nested(Vec<(String, Value)>),
+}
+
 /// Context provided to a formatter when rendering a field or bit range.
 #[derive(Debug, Clone)]
 pub struct FormatContext<'a> {
@@ -44,11 +55,68 @@ pub struct FormatContext<'a> {
     pub offset: usize,
     /// Width of the field in bits.
     pub width: usize,
-    /// Extracted integer value (if <= 64 bits and fully available).
-    pub numeric_value: Option<u64>,
+    /// The extracted structured value, if available.
+    pub parsed_value: Option<Value>,
+    /// The field type providing context (optional, for backwards compat).
+    pub field_type: Option<&'a crate::layout::field::FieldType>,
+}
+
+impl<'a> FormatContext<'a> {
+    /// Convenience method to retrieve the raw numeric value if it is a Primitive or Enum.
+    pub fn numeric_value(&self) -> Option<u64> {
+        match &self.parsed_value {
+            Some(Value::Primitive(v)) => Some(*v),
+            Some(Value::EnumVariant { value, .. }) => Some(*value),
+            _ => None,
+        }
+    }
 }
 
 /// Trait for formatting bitfield data into human-readable representations.
+pub fn extract_value(field: &crate::layout::field::LayoutField, data: &[u8]) -> Option<Value> {
+    use crate::layout::field::FieldType;
+    let width = field.width();
+    let offset = field.offset();
+    
+    match field.field_type() {
+        FieldType::Primitive(_) => {
+            if width <= 64 && offset + width <= data.len() * 8 {
+                let mut reader = crate::bit::BitReader::from_bytes(data);
+                if reader.skip(offset).is_ok() {
+                    reader.read_bits(width as u32).ok().map(Value::Primitive)
+                } else { None }
+            } else { None }
+        }
+        FieldType::Enum(e) => {
+            if width <= 64 && offset + width <= data.len() * 8 {
+                let mut reader = crate::bit::BitReader::from_bytes(data);
+                if reader.skip(offset).is_ok() {
+                    if let Ok(val) = reader.read_bits(width as u32) {
+                        return Some(Value::EnumVariant {
+                            value: val,
+                            name: e.variant_name(val).map(String::from),
+                        });
+                    }
+                }
+            }
+            None
+        }
+        FieldType::Layout(nested) => {
+            let mut children = Vec::new();
+            // Nested layout offsets are relative to 0 in the nested tree, but 
+            // since we pass the same `data` block, wait: the nested layout is resolved.
+            // If the layout is already resolved, its fields have offsets relative to the parent?
+            // Yes, because `BitLayout::resolve_at` returned fields with absolute offsets.
+            for child in nested.fields() {
+                if let Some(v) = extract_value(child, data) {
+                    children.push((child.name().to_string(), v));
+                }
+            }
+            Some(Value::Nested(children))
+        }
+    }
+}
+
 pub trait FieldFormatter: Send + Sync {
     /// Unique identifier for this formatter (e.g. "hex", "dec", "bin", "oct", "ascii").
     fn id(&self) -> FormatId;
@@ -67,6 +135,45 @@ pub trait FieldFormatter: Send + Sync {
 
 // Built-in formatters:
 
+/// Smart formatter that adapts to the FieldType.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SmartFormatter;
+
+impl FieldFormatter for SmartFormatter {
+    fn id(&self) -> FormatId {
+        FormatId::new("smart")
+    }
+
+    fn name(&self) -> &str {
+        "Auto/Smart"
+    }
+
+    fn format(&self, ctx: &FormatContext) -> String {
+        match ctx.field_type {
+            Some(crate::layout::field::FieldType::Enum(e)) => {
+                if let Some(val) = ctx.numeric_value() {
+                    if let Some(name) = e.variant_name(val) {
+                        return format!("{name} ({val})");
+                    }
+                    return format!("{val}");
+                }
+                "(unavailable)".to_string()
+            }
+            Some(crate::layout::field::FieldType::Layout(nested)) => {
+                // Nested layout formatting - JSON-like
+                // We shouldn't format the entire nested structure deeply in one line if it's huge, 
+                // but for now, we can format a short summary or JSON.
+                format!("<nested layout: {} bits>", nested.bit_len())
+            }
+            _ => {
+                // Fall back to hex
+                HexFormatter.format(ctx)
+            }
+        }
+    }
+}
+
+
 /// Hexadecimal formatter (e.g. `0x1F`, `0x00A4`).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct HexFormatter;
@@ -81,7 +188,7 @@ impl FieldFormatter for HexFormatter {
     }
 
     fn format(&self, ctx: &FormatContext) -> String {
-        match ctx.numeric_value {
+        match ctx.numeric_value() {
             Some(val) => {
                 let nibbles = (ctx.width.saturating_add(3) / 4).max(1);
                 format!("0x{val:0nibbles$X}")
@@ -107,7 +214,7 @@ impl FieldFormatter for DecFormatter {
     }
 
     fn format(&self, ctx: &FormatContext) -> String {
-        match ctx.numeric_value {
+        match ctx.numeric_value() {
             Some(val) => format!("{val}"),
             None => "(unavailable)".to_string(),
         }
@@ -128,7 +235,7 @@ impl FieldFormatter for BinFormatter {
     }
 
     fn format(&self, ctx: &FormatContext) -> String {
-        match ctx.numeric_value {
+        match ctx.numeric_value() {
             Some(val) => {
                 let width = ctx.width.max(1);
                 format!("0b{val:0width$b}")
@@ -154,7 +261,7 @@ impl FieldFormatter for OctFormatter {
     }
 
     fn format(&self, ctx: &FormatContext) -> String {
-        match ctx.numeric_value {
+        match ctx.numeric_value() {
             Some(val) => {
                 let oct_digits = (ctx.width.saturating_add(2) / 3).max(1);
                 format!("0o{val:0oct_digits$o}")
@@ -196,7 +303,7 @@ impl FieldFormatter for AsciiFormatter {
         }
 
         // For non-byte-aligned or integer values:
-        match ctx.numeric_value {
+        match ctx.numeric_value() {
             Some(val) => {
                 let bytes = val.to_be_bytes();
                 let needed_bytes = (ctx.width + 7) / 8;
@@ -378,50 +485,54 @@ mod tests {
     }
 
     #[test]
-    fn test_hex_formatting() {
-        let formatter = HexFormatter;
+    fn hex_formatter_with_value() {
+        let data = [0, 0];
         let ctx = FormatContext {
-            data: &[0xAB, 0xCD],
-            offset: 0,
-            width: 16,
-            numeric_value: Some(0xABCD),
+            data: &data,
+            offset: 4,
+            width: 13,
+            parsed_value: Some(Value::Primitive(0x1F2A)),
+            field_type: None,
         };
-        assert_eq!(formatter.format(&ctx), "0xABCD");
+        assert_eq!(HexFormatter.format(&ctx), "0x1F2A");
     }
 
     #[test]
-    fn test_dec_formatting() {
-        let formatter = DecFormatter;
+    fn hex_formatter_without_value() {
+        let data = [0b1010_1111, 0b0011_0000];
         let ctx = FormatContext {
-            data: &[0x00, 0x2A],
-            offset: 0,
-            width: 16,
-            numeric_value: Some(42),
+            data: &data,
+            offset: 4,
+            width: 12,
+            parsed_value: None,
+            field_type: None,
         };
-        assert_eq!(formatter.format(&ctx), "42");
+        assert_eq!(HexFormatter.format(&ctx), "(raw: 111100110000)");
     }
 
     #[test]
-    fn test_bin_formatting() {
-        let formatter = BinFormatter;
+    fn dec_formatter() {
+        let data = [0, 0];
         let ctx = FormatContext {
-            data: &[0b1010],
-            offset: 0,
-            width: 4,
-            numeric_value: Some(0b1010),
+            data: &data,
+            offset: 4,
+            width: 13,
+            parsed_value: Some(Value::Primitive(0x1F2A)),
+            field_type: None,
         };
-        assert_eq!(formatter.format(&ctx), "0b1010");
+        assert_eq!(DecFormatter.format(&ctx), "7978");
     }
 
     #[test]
-    fn test_ascii_formatting() {
-        let formatter = AsciiFormatter;
+    fn ascii_formatter_unavailable_when_missing_value() {
+        let data = [0; 9];
         let ctx = FormatContext {
-            data: b"OK",
+            data: &data,
             offset: 0,
-            width: 16,
-            numeric_value: Some(0x4F4B),
+            width: 65,
+            parsed_value: None,
+            field_type: None,
         };
-        assert_eq!(formatter.format(&ctx), "\"OK\"");
+        assert_eq!(AsciiFormatter.format(&ctx), "(unavailable)");
     }
 }

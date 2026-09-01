@@ -89,6 +89,40 @@ macro_rules! impl_builder_methods {
             },
         );
 
+        // :field_layout(name, layout) -> self
+        $methods.add_method_mut(
+            "field_layout",
+            |_, this, (name, nested_ud): (String, mlua::AnyUserData)| {
+                let nested = nested_ud.borrow::<LuaLayout>()?;
+                let mut inner = this.builder.borrow_mut();
+                let b = inner.take().ok_or_else(|| {
+                    mlua::Error::runtime("builder already consumed by :build()")
+                })?;
+                *inner = Some(b.field_layout(&name, std::sync::Arc::new(nested.layout.clone())));
+                Ok(LuaLayoutBuilderRef {
+                    name: this.name.clone(),
+                    builder: Rc::clone(&this.builder),
+                })
+            },
+        );
+
+        // :field_enum(name, enum_def) -> self
+        $methods.add_method_mut(
+            "field_enum",
+            |_, this, (name, enum_ud): (String, mlua::AnyUserData)| {
+                let enum_def = enum_ud.borrow::<LuaEnumDef>()?;
+                let mut inner = this.builder.borrow_mut();
+                let b = inner.take().ok_or_else(|| {
+                    mlua::Error::runtime("builder already consumed by :build()")
+                })?;
+                *inner = Some(b.field_enum(&name, std::sync::Arc::new(enum_def.def.clone())));
+                Ok(LuaLayoutBuilderRef {
+                    name: this.name.clone(),
+                    builder: Rc::clone(&this.builder),
+                })
+            },
+        );
+
         // :build() -> LuaLayout
         $methods.add_method_mut("build", |_, this, ()| {
             let mut inner = this.builder.borrow_mut();
@@ -104,6 +138,43 @@ macro_rules! impl_builder_methods {
             })
         });
     };
+}
+
+use crate::layout::enum_def::{EnumDef, EnumVariant};
+
+#[derive(Clone)]
+struct LuaEnumDef {
+    def: EnumDef,
+}
+
+impl UserData for LuaEnumDef {}
+
+#[derive(Clone)]
+struct LuaEnumBuilder {
+    name: String,
+    variants: Vec<EnumVariant>,
+}
+
+impl UserData for LuaEnumBuilder {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method_mut(
+            "variant",
+            |_, this, (value, name): (u64, String)| {
+                this.variants.push(EnumVariant {
+                    value,
+                    name,
+                });
+                Ok(this.clone())
+            },
+        );
+
+        methods.add_method_mut("build", |_, this, width: usize| {
+            let width_type = crate::layout::field::FieldWidth::Fixed(width);
+            let def = EnumDef::new(&this.name, width_type, this.variants.clone())
+                .map_err(|e| mlua::Error::runtime(e.to_string()))?;
+            Ok(LuaEnumDef { def })
+        });
+    }
 }
 
 impl UserData for LuaLayoutBuilder {
@@ -391,6 +462,15 @@ fn register_bpc_module(lua: &Lua) -> LuaResult<()> {
         })
     })?;
     bpc.set("layout", layout_fn)?;
+
+    // bpc.enum(name) -> LuaEnumBuilder
+    let enum_fn = lua.create_function(|_, name: String| {
+        Ok(LuaEnumBuilder {
+            name,
+            variants: Vec::new(),
+        })
+    })?;
+    bpc.set("enum", enum_fn)?;
 
     // bpc.hex(hex_string) -> table of bytes
     //

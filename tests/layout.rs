@@ -347,7 +347,7 @@ mod view_state {
     fn initial_cursor_at_zero() {
         let view = LayoutViewState::new(demo_layout(), vec![0; 4]);
         assert_eq!(view.cursor_bit(), 0);
-        assert_eq!(view.selected_field_index(), Some(0));
+        assert_eq!(view.selected_field_path(), Some("version".into()));
     }
 
     #[test]
@@ -355,7 +355,7 @@ mod view_state {
         let mut view = LayoutViewState::new(demo_layout(), vec![0; 4]);
         view.move_next_field();
         assert_eq!(view.cursor_bit(), 3); // opcode starts at 3
-        assert_eq!(view.selected_field_index(), Some(1));
+        assert_eq!(view.selected_field_path(), Some("opcode".into()));
     }
 
     #[test]
@@ -365,9 +365,9 @@ mod view_state {
         view.move_next_field(); // opcode
         view.move_next_field(); // length
         view.move_next_field(); // flags
-        assert_eq!(view.selected_field_index(), Some(3));
+        assert_eq!(view.selected_field_path(), Some("flags".into()));
         view.move_next_field(); // should stay at flags
-        assert_eq!(view.selected_field_index(), Some(3));
+        assert_eq!(view.selected_field_path(), Some("flags".into()));
     }
 
     #[test]
@@ -376,7 +376,7 @@ mod view_state {
         view.move_next_field(); // go to opcode
         view.move_prev_field(); // back to version
         assert_eq!(view.cursor_bit(), 0);
-        assert_eq!(view.selected_field_index(), Some(0));
+        assert_eq!(view.selected_field_path(), Some("version".into()));
     }
 
     #[test]
@@ -443,7 +443,7 @@ mod view_state {
         view.move_next_bit(); // no-op
         view.move_prev_bit(); // no-op
         assert_eq!(view.cursor_bit(), 0);
-        assert_eq!(view.selected_field_index(), None);
+        assert_eq!(view.selected_field_path(), None);
     }
 }
 

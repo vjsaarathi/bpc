@@ -8,6 +8,12 @@ pub enum LayoutError {
     /// Field name is empty.
     EmptyFieldName,
 
+    /// Field name contains invalid characters (e.g. '.').
+    InvalidFieldName {
+        /// Name of the invalid field.
+        name: String,
+    },
+
     /// Field width is zero.
     ZeroWidth {
         /// Name of the zero-width field.
@@ -89,6 +95,7 @@ impl fmt::Display for LayoutError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EmptyFieldName => write!(f, "field name must not be empty"),
+            Self::InvalidFieldName { name } => write!(f, "field name \"{name}\" is invalid (cannot contain '.')"),
             Self::ZeroWidth { name } => write!(f, "field \"{name}\" has zero width"),
             Self::DuplicateName { name } => write!(f, "duplicate field name \"{name}\""),
             Self::OverlappingFields { existing, new } => {

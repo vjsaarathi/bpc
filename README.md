@@ -50,6 +50,9 @@ cargo run -- examples/ipv6_packet.lua examples/ipv6_packet.bin
 
 # TCP Header (demonstrates dense bit-packing and boolean flags)
 cargo run -- examples/tcp_header.lua examples/tcp_header.bin
+
+# Complex Nested Layout (DNS Packet, Enums, and Sub-layouts)
+cargo run -- examples/complex_nested.lua examples/complex_nested.bin
 ```
 
 ## Note

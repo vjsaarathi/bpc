@@ -34,3 +34,4 @@ pub mod layout;
 pub use error::{LayoutError, LayoutResult};
 pub use field::{BitRange, FieldWidth, LayoutField, LengthUnit};
 pub use layout::{BitLayout, BitLayoutBuilder};
+pub mod enum_def;

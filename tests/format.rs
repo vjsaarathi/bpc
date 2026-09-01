@@ -16,7 +16,7 @@ impl FieldFormatter for CustomPrefixFormatter {
     }
 
     fn format(&self, ctx: &FormatContext) -> String {
-        match ctx.numeric_value {
+        match ctx.numeric_value() {
             Some(v) => format!("VAL#{v}"),
             None => "VAL#?".to_string(),
         }
@@ -34,11 +34,13 @@ fn test_custom_formatter_registration() {
         "Custom Prefix"
     );
 
+    let data = vec![0x2A];
     let ctx = FormatContext {
-        data: &[0x2A],
+        data: &data,
         offset: 0,
         width: 8,
-        numeric_value: Some(42),
+        parsed_value: Some(bpc::format::Value::Primitive(42)),
+        field_type: None,
     };
     let formatted = reg.get(&FormatId::new("custom_prefix")).unwrap().format(&ctx);
     assert_eq!(formatted, "VAL#42");
@@ -57,32 +59,32 @@ fn test_view_state_field_and_global_toggle() {
 
     // Initial global format should be "hex"
     assert_eq!(view.global_format().as_str(), "hex");
-    assert_eq!(view.field_format(0).as_str(), "hex");
-    assert_eq!(view.field_format(1).as_str(), "hex");
+    assert_eq!(view.field_format("ver").as_str(), "hex");
+    assert_eq!(view.field_format("type").as_str(), "hex");
 
-    assert_eq!(view.format_field_value(0), "0xA");
-    assert_eq!(view.format_field_value(1), "0xB");
+    assert_eq!(view.format_field_value("ver"), "0xA");
+    assert_eq!(view.format_field_value("type"), "0xB");
 
     // Toggle selected field (index 0 is selected by default)
     view.toggle_selected_field_format();
-    assert_eq!(view.field_format(0).as_str(), "dec");
-    assert_eq!(view.field_format(1).as_str(), "hex"); // field 1 still hex
-    assert_eq!(view.format_field_value(0), "10");
-    assert_eq!(view.format_field_value(1), "0xB");
+    assert_eq!(view.field_format("ver").as_str(), "dec");
+    assert_eq!(view.field_format("type").as_str(), "hex"); // field 1 still hex
+    assert_eq!(view.format_field_value("ver"), "10");
+    assert_eq!(view.format_field_value("type"), "0xB");
 
     // Toggle global format: advances hex -> dec, and resets per-field overrides
     view.toggle_global_format();
     assert_eq!(view.global_format().as_str(), "dec");
-    assert_eq!(view.field_format(0).as_str(), "dec");
-    assert_eq!(view.field_format(1).as_str(), "dec");
-    assert_eq!(view.format_field_value(0), "10");
-    assert_eq!(view.format_field_value(1), "11");
+    assert_eq!(view.field_format("ver").as_str(), "dec");
+    assert_eq!(view.field_format("type").as_str(), "dec");
+    assert_eq!(view.format_field_value("ver"), "10");
+    assert_eq!(view.format_field_value("type"), "11");
 
     // Toggle global format to binary
     view.toggle_global_format();
     assert_eq!(view.global_format().as_str(), "bin");
-    assert_eq!(view.format_field_value(0), "0b1010");
-    assert_eq!(view.format_field_value(1), "0b1011");
+    assert_eq!(view.format_field_value("ver"), "0b1010");
+    assert_eq!(view.format_field_value("type"), "0b1011");
 }
 
 #[test]
@@ -95,5 +97,5 @@ fn test_custom_registry_in_view_state() {
     let view = LayoutViewState::with_registry(layout, data, reg);
 
     assert_eq!(view.global_format().as_str(), "custom_prefix");
-    assert_eq!(view.format_field_value(0), "VAL#123");
+    assert_eq!(view.format_field_value("field1"), "VAL#123");
 }
